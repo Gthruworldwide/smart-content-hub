@@ -17,7 +17,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # استيراد إعدادات قاعدة البيانات
-from database import SessionLocal, Article, SearchLog, get_db
+from database import SessionLocal, Article, SearchLog, ArticleAnalysis, get_db
+
+# استيراد routers
+try:
+    from routers.analysis import router as analysis_router
+    logger.info("✅ Analysis router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Analysis router loading failed: {str(e)}")
+    analysis_router = None
 
 # 1. تهيئة تطبيق FastAPI
 app = FastAPI(

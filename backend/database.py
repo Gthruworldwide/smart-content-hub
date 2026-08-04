@@ -60,6 +60,32 @@ class SearchLog(Base):
         return f"<SearchLog(id={self.id}, query='{self.query}', results_count={self.results_count})>"
 
 
+class ArticleAnalysis(Base):
+    """جدول نتائج تحليل المقالات"""
+    __tablename__ = "article_analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    original_url = Column(String(2048), unique=True, index=True, nullable=False)
+    title = Column(String(500), nullable=False)
+    summary = Column(Text, nullable=True)
+    keywords = Column(Text, nullable=True)  # JSON array stored as text
+    related_articles_count = Column(Integer, default=0)
+    related_articles_data = Column(Text, nullable=True)  # JSON stored as text
+    analysis_status = Column(String(50), default="pending")  # pending, processing, completed, failed
+    celery_task_id = Column(String(200), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_analyses_url', 'original_url'),
+        Index('idx_analyses_created_at', 'created_at'),
+        Index('idx_analyses_status', 'analysis_status'),
+    )
+
+    def __repr__(self):
+        return f"<ArticleAnalysis(id={self.id}, title='{self.title[:50]}...')>"
+
+
 # ============= Database Initialization =============
 
 def init_db():
