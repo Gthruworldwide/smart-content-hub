@@ -1,0 +1,7 @@
+celery==5.3.1
+redis==4.6.0
+beautifulsoup4==4.12.2
+requests==2.31.0
+elasticsearch==8.7.0
+sqlalchemy==2.0.20
+psycopg2-binary==2.9.7

@@ -1,0 +1,228 @@
+version: '3.8'
+
+services:
+  # 1. قاعدة البيانات الأساسية (PostgreSQL)
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: hub_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - hub-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 2. وسيط الرسائل (Redis)
+  redis_broker:
+    image: redis:7-alpine
+    container_name: hub_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - hub-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 3. محرك البحث (Elasticsearch)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
+    container_name: hub_elastic
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    networks:
+      - hub-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 | grep -q cluster_name"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 4. الواجهة الخلفية (Backend API - FastAPI)
+  backend:
+    build: ./backend
+    container_name: hub_backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres_db:5432/${DB_NAME}
+      REDIS_URL: ${REDIS_URL}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+      BACKEND_PORT: ${BACKEND_PORT}
+    ports:
+      - "8000:8000"
+    networks:
+      - hub-network
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 5. معالج المهام الخلفية (Worker - Celery)
+  worker:
+    build: ./worker
+    container_name: hub_worker
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres_db:5432/${DB_NAME}
+      REDIS_URL: ${REDIS_URL}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+    networks:
+      - hub-network
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    command: celery -A tasks worker --loglevel=info --concurrency=4
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 6. الواجهة الأمامية (Frontend - React)
+  frontend:
+    build: ./frontend
+    container_name: hub_frontend
+    restart: always
+    networks:
+      - hub-network
+    expose:
+      - "80"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 7. البوابة العكسية (Nginx - Reverse Proxy)
+  nginx:
+    build: ./nginx
+    container_name: hub_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - hub-network
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 8. Prometheus (المراقبة)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hub_prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    networks:
+      - hub-network
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 9. Grafana (لوحة المراقبة)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hub_grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    networks:
+      - hub-network
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  redis_data:
+  es_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  hub-network:
+    driver: bridge
