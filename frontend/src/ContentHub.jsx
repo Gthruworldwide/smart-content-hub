@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './ContentHub.css';
+import AnalysisDetails from './AnalysisDetails';
+import SearchFilterBar from './SearchFilterBar';
 
 const ContentHub = () => {
   // ============= State Management =============
@@ -10,6 +12,15 @@ const ContentHub = () => {
   const [stats, setStats] = useState(null);
   const [currentPage, setCurrentPage] = useState(0);
   const [totalArticles, setTotalArticles] = useState(0);
+  const [analysesByUrl, setAnalysesByUrl] = useState({});
+
+  // ============= Search & Filter State =============
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterMode, setFilterMode] = useState('all');
+  const [searchResults, setSearchResults] = useState(null); // null = لا توجد نتائج Elasticsearch بعد لهذا الاستعلام
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  const searchQueryRef = useRef('');
 
   const itemsPerPage = 10;
 
@@ -43,11 +54,127 @@ const ContentHub = () => {
     }
   };
 
+  // ============= Fetch Related Articles Analyses =============
+  const fetchAnalyses = async () => {
+    try {
+      const response = await fetch('/api/content/latest-analyses?limit=100');
+      if (response.ok) {
+        const data = await response.json();
+        const map = {};
+        data.forEach((analysis) => {
+          if (analysis.original_url) {
+            map[analysis.original_url] = analysis;
+          }
+        });
+        setAnalysesByUrl(map);
+      }
+    } catch (error) {
+      console.error("خطأ في جلب المقالات المرتبطة:", error);
+    }
+  };
+
   // ============= Initial Load =============
   useEffect(() => {
     fetchArticles(0);
     fetchStatistics();
+    fetchAnalyses();
   }, []);
+
+  // ============= Elasticsearch Instant Search (debounced) =============
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+    const trimmed = searchQuery.trim();
+
+    if (!trimmed) {
+      setSearchResults(null);
+      setIsSearching(false);
+      setSearchError('');
+      return;
+    }
+
+    setIsSearching(true);
+    setSearchError('');
+
+    const handle = setTimeout(() => {
+      performSearch(trimmed);
+    }, 400);
+
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  const performSearch = async (query) => {
+    try {
+      const response = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, limit: 20 }),
+      });
+      const data = await response.json();
+
+      if (response.ok && data.task_id) {
+        pollSearchStatus(data.task_id, query);
+      } else if (searchQueryRef.current.trim() === query) {
+        setIsSearching(false);
+        setSearchError(data.detail || 'تعذر تنفيذ البحث');
+      }
+    } catch (error) {
+      console.error("خطأ في البحث الفوري:", error);
+      if (searchQueryRef.current.trim() === query) {
+        setIsSearching(false);
+        setSearchError('حدث خطأ في الاتصال بمحرك البحث');
+      }
+    }
+  };
+
+  const pollSearchStatus = async (taskId, query, attempt = 0) => {
+    // إذا تغيّر الاستعلام أثناء الانتظار، توقف عن المتابعة
+    if (searchQueryRef.current.trim() !== query) return;
+
+    const maxAttempts = 15;
+    if (attempt > maxAttempts) {
+      setIsSearching(false);
+      setSearchError('انتهت مهلة البحث، حاول مجدداً');
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/status/${taskId}`);
+      const data = await response.json();
+
+      if (searchQueryRef.current.trim() !== query) return;
+
+      if (data.status === 'SUCCESS') {
+        const result = data.result || {};
+        if (result.status === 'success') {
+          setSearchResults(result.results || []);
+          setIsSearching(false);
+          setSearchError('');
+        } else {
+          setIsSearching(false);
+          setSearchError(result.error || 'تعذر إتمام البحث');
+        }
+      } else if (data.status === 'FAILURE') {
+        setIsSearching(false);
+        setSearchError('فشل تنفيذ البحث');
+      } else {
+        setTimeout(() => pollSearchStatus(taskId, query, attempt + 1), 1000);
+      }
+    } catch (error) {
+      console.error("خطأ أثناء متابعة نتائج البحث:", error);
+      if (searchQueryRef.current.trim() === query) {
+        setIsSearching(false);
+        setSearchError('حدث خطأ أثناء متابعة نتائج البحث');
+      }
+    }
+  };
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setSearchResults(null);
+    setIsSearching(false);
+    setSearchError('');
+  };
 
   // ============= Polling Function for Task Status =============
   const pollTaskStatus = async (taskId, attempt = 0) => {
@@ -70,6 +197,7 @@ const ContentHub = () => {
         setStatusMessage('✅ تم سحب المقال وحفظه بنجاح!');
         await fetchArticles(0); // تحديث قائمة المقالات
         await fetchStatistics(); // تحديث الإحصائيات
+        await fetchAnalyses(); // تحديث المقالات المرتبطة
         setIsLoading(false);
       } else if (data.status === 'FAILURE') {
         // المهمة فشلت
@@ -136,6 +264,9 @@ const ContentHub = () => {
         setStatusMessage('✅ تم حذف المقال بنجاح');
         await fetchArticles(currentPage);
         await fetchStatistics();
+        if (searchQueryRef.current.trim()) {
+          performSearch(searchQueryRef.current.trim());
+        }
       } else {
         setStatusMessage('❌ فشل حذف المقال');
       }
@@ -149,6 +280,52 @@ const ContentHub = () => {
   const totalPages = Math.ceil(totalArticles / itemsPerPage);
   const canGoPrev = currentPage > 0;
   const canGoNext = currentPage < totalPages - 1;
+
+  // ============= Search & Filter Derivation =============
+  const isSearchActive = searchQuery.trim().length > 0;
+
+  // فلترة فورية للمقالات المحمّلة حالياً (بدون انتظار الخادم)
+  const localSearchMatches = useMemo(() => {
+    const trimmed = searchQuery.trim().toLowerCase();
+    if (!trimmed) return articles;
+    return articles.filter((article) => {
+      const analysis = analysesByUrl[article.url];
+      const haystack = [
+        article.title,
+        article.content_preview,
+        analysis?.summary,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(trimmed);
+    });
+  }, [articles, searchQuery, analysesByUrl]);
+
+  // تحويل نتائج Elasticsearch إلى نفس شكل بيانات المقال المستخدم في البطاقات
+  const searchResultArticles = useMemo(() => {
+    if (!searchResults) return null;
+    return searchResults.map((result) => ({
+      id: result.article_id,
+      url: result.url,
+      title: result.title,
+      content_preview: result.content_preview,
+      created_at: result.created_at,
+      _searchScore: result.score,
+    }));
+  }, [searchResults]);
+
+  const baseArticles = isSearchActive
+    ? (searchResultArticles !== null ? searchResultArticles : localSearchMatches)
+    : articles;
+
+  const displayedArticles = useMemo(() => {
+    return baseArticles.filter((article) => {
+      if (filterMode === 'all') return true;
+      const hasAnalysis = Boolean(analysesByUrl[article.url]);
+      return filterMode === 'analyzed' ? hasAnalysis : !hasAnalysis;
+    });
+  }, [baseArticles, filterMode, analysesByUrl]);
 
   return (
     <div className="content-hub-container">
@@ -215,7 +392,10 @@ const ContentHub = () => {
           <div className="articles-header">
             <h3>المقالات المحفوظة ({totalArticles})</h3>
             <button
-              onClick={() => fetchArticles(currentPage)}
+              onClick={() => {
+                fetchArticles(currentPage);
+                fetchAnalyses();
+              }}
               className="refresh-button"
               title="تحديث القائمة"
             >
@@ -223,59 +403,91 @@ const ContentHub = () => {
             </button>
           </div>
 
+          {/* شريط البحث الفوري والفلترة */}
+          <SearchFilterBar
+            searchQuery={searchQuery}
+            onSearchQueryChange={setSearchQuery}
+            filterMode={filterMode}
+            onFilterModeChange={setFilterMode}
+            resultsCount={displayedArticles.length}
+            isSearching={isSearching}
+            searchError={searchError}
+            isSearchActive={isSearchActive}
+            onClearSearch={handleClearSearch}
+          />
+
           {/* Articles List */}
           <div className="articles-list">
-            {articles.length > 0 ? (
-              articles.map((article) => (
-                <article key={article.id} className="article-card">
-                  <div className="article-header">
-                    <h4 className="article-title">{article.title}</h4>
-                    <button
-                      onClick={() => handleDeleteArticle(article.id)}
-                      className="delete-button"
-                      title="حذف المقال"
-                    >
-                      🗑️
-                    </button>
-                  </div>
-
-                  <p className="article-preview">
-                    {article.content_preview || article.content?.substring(0, 150)}...
-                  </p>
-
-                  <div className="article-footer">
-                    <a
-                      href={article.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="original-link"
-                    >
-                      🔗 الرابط الأصلي
-                    </a>
-                    <span className="article-date">
-                      📅 {new Date(article.created_at).toLocaleString('ar-EG')}
-                    </span>
-                  </div>
-
-                  {article.content_length && (
-                    <div className="article-meta">
-                      📝 عدد الكلمات: {Math.ceil(article.content_length / 5)}
+            {displayedArticles.length > 0 ? (
+              displayedArticles.map((article) => {
+                const analysis = analysesByUrl[article.url];
+                return (
+                  <article key={article.id} className="article-card">
+                    <div className="article-header">
+                      <h4 className="article-title">{article.title}</h4>
+                      <button
+                        onClick={() => handleDeleteArticle(article.id)}
+                        className="delete-button"
+                        title="حذف المقال"
+                      >
+                        🗑️
+                      </button>
                     </div>
-                  )}
-                </article>
-              ))
+
+                    <p className="article-preview">
+                      {article.content_preview || article.content?.substring(0, 150)}...
+                    </p>
+
+                    <div className="article-footer">
+                      <a
+                        href={article.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="original-link"
+                      >
+                        🔗 الرابط الأصلي
+                      </a>
+                      <span className="article-date">
+                        📅 {new Date(article.created_at).toLocaleString('ar-EG')}
+                      </span>
+                    </div>
+
+                    {article.content_length && (
+                      <div className="article-meta">
+                        📝 عدد الكلمات: {Math.ceil(article.content_length / 5)}
+                      </div>
+                    )}
+
+                    {typeof article._searchScore === 'number' && (
+                      <div className="article-meta">
+                        <span className="search-score-badge">
+                          🎯 درجة الصلة بالبحث: {article._searchScore}
+                        </span>
+                      </div>
+                    )}
+
+                    <AnalysisDetails analysis={analysis} />
+                  </article>
+                );
+              })
             ) : (
               <div className="no-articles">
-                <p>لا توجد مقالات محفوظة حتى الآن</p>
-                <p style={{ fontSize: '14px', color: '#888' }}>
-                  ابدأ برمز رابط لسحب أول مقال لك
-                </p>
+                {isSearchActive ? (
+                  <p>لا توجد نتائج مطابقة لبحثك</p>
+                ) : (
+                  <>
+                    <p>لا توجد مقالات محفوظة حتى الآن</p>
+                    <p style={{ fontSize: '14px', color: '#888' }}>
+                      ابدأ برمز رابط لسحب أول مقال لك
+                    </p>
+                  </>
+                )}
               </div>
             )}
           </div>
 
           {/* Pagination Controls */}
-          {totalPages > 1 && (
+          {!isSearchActive && totalPages > 1 && (
             <div className="pagination">
               <button
                 onClick={() => fetchArticles(currentPage - 1)}
